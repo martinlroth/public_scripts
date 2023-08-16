@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+
+# SPDX-License-Identifier: MIT
+# Copyright 2023 Martin L Roth
+
+IOMUX_BASE=4275571968 #0xFED80D00
+GPIO_BASE=4275574016  #0xFED81500
+INTER_MASTER=252      #0xFC
+BLOCKED=0
+SHOW_STATUS=0
+
+# bits 30 & 31 are reserved
+readonly bit_wake_status=29
+readonly bit_int_status=28
+# bits 27 & 26 are reserved
+#readonly bit_sw_cntrl_en=25
+#readonly bit_sw_cntrl_in=24
+readonly bit_output_en=23
+readonly bit_output_level=22
+readonly bit_pull_down_en=21
+readonly bit_pull_up_en=20
+# bit 19 is reserved
+readonly shift_drive_str=17
+readonly  drive_str_mask="0x03"
+readonly bit_pin_status=16
+readonly bit_wake_s4_s5=15
+readonly bit_wake_s3=14
+readonly bit_wake_s0i3=13
+readonly bit_en_int_delivery=12
+readonly bit_en_int_status=11
+readonly shift_active_level=9
+readonly  active_level_mask="0x03"
+readonly bit_lev_trig=8
+readonly bit_debounce_unit_high=7
+readonly shift_debounce_cntrl=5
+readonly  debounce_cntrl_mask="0x03"
+readonly bit_debounce_unit_low=4
+readonly shift_debounce_tmr=0
+readonly  debounce_tmr_mask="0x0f"
+
+or() {
+  sudo iotools or "$1" "$2"
+}
+
+and() {
+  sudo iotools and "$1" "$2"
+}
+
+and_bit() {
+  if [[ "$(sudo iotools and "$1" "$(sudo iotools shl 1 "$2")")" = "0x0" ]]; then
+    printf "0x00"
+  else
+    printf "0x01"
+  fi
+}
+
+shift_and_mask() {
+  val=$1
+  shift=$2
+  mask=$3
+  sudo iotools and "$(sudo iotools shr "$val" "$shift")" "$mask"
+}
+
+read_8() {
+  if ! sudo iotools mmio_read8 "$1"; then
+    echo "Error: Could not read MMIO. Exiting." >&2
+    exit 1
+  fi
+}
+
+read_32() {
+  if ! sudo iotools mmio_read32 "$1"; then
+    echo "Error: Could not read MMIO. Exiting." >&2
+    exit 1
+  fi
+}
+
+hex2dec() {
+  val=$1
+  echo "obase=10; ibase=16; ${val^^}" | sed 's/0X//' | bc
+}
+
+dec2hex() {
+  val=$1
+  echo "obase=16; ibase=10; $val" | bc
+}
+
+get_offset() {
+  local base=$1
+  local offset=$2
+  local mul=$3
+  if [[ -x "${mul}" ]]; then
+    mul=1
+  fi
+  echo "0x$(dec2hex "$((base + (gpio * mul)))")"
+}
+
+print_czn_iomux() {
+  local gpio=$1
+  local val=$2
+
+  if [[ "${val}" = "0xff" ]]; then
+    echo "Blocked"
+    return 1
+  fi
+
+  case ${gpio} in
+    0) case ${val} in 0x00) echo "*PWR_BTN_L" ;; 0x01) echo "AGPIO0" ;; *) echo "Reserved" ;; esac ;;
+    1) case ${val} in 0x00) echo "*SYS_RESET_L" ;; 0x01) echo "AGPIO1" ;; *) echo "Reserved" ;; esac ;;
+    2) case ${val} in 0x00) echo "*WAKE_L" ;; 0x01) echo "AGPIO2" ;; *) echo "Reserved" ;; esac ;;
+    3) case ${val} in 0x00) echo "*AGPIO3" ;; *) echo "Reserved" ;; esac ;;
+    4) case ${val} in 0x00) echo "*AGPIO4" ;; *) echo "Reserved" ;; esac ;;
+    5) case ${val} in 0x00) echo "*AGPIO5" ;; 0x01) echo "DEVSLP0" ;; 0x02) echo "DEVSLP2" ;; *) echo "Reserved" ;; esac ;;
+    6) case ${val} in 0x00) echo "*AGPIO6" ;; 0x01) echo "DEVSLP1" ;; 0x02) echo "DEVSLP3" ;; *) echo "Reserved" ;; esac ;;
+    7) case ${val} in 0x00) echo "*AGPIO7" ;; 0x01) echo "FCH_ACP_I2S_SDIN" ;; *) echo "Reserved" ;; esac ;;
+    8) case ${val} in 0x00) echo "*AGPIO8" ;; 0x01) echo "FCH_ACP_I2S_LRCLK" ;; *) echo "Reserved" ;; esac ;;
+    9) case ${val} in 0x00) echo "*AGPIO9" ;; 0x01) echo "Reserved" ;; 0x02) echo "MDIO1_SCL" ;; *) echo "Reserved" ;; esac ;;
+    10) case ${val} in 0x00) echo "*AGPIO10" ;; 0x01) echo "S0A3_GPIO" ;; 0x02) echo "Reserved" ;; 0x03) echo "MDIO0_SCL" ;; *) echo "Reserved" ;; esac ;;
+    11) case ${val} in 0x00) echo "*AGPIO11" ;; 0x01) echo "BLINK" ;; *) echo "Reserved" ;; esac ;;
+    12) case ${val} in 0x00) echo "*LLB_L" ;; 0x01) echo "AGPIO12" ;; *) echo "Reserved" ;; esac ;;
+    16) case ${val} in 0x00) echo "*USB_OC0_L" ;; 0x01) echo "AGPIO16" ;; *) echo "Reserved" ;; esac ;;
+    17) case ${val} in 0x00) echo "*USB_OC1_L" ;; 0x01) echo "AGPIO17" ;; *) echo "Reserved" ;; esac ;;
+    18) case ${val} in 0x00) echo "*USB_OC2_L" ;; 0x01) echo "AGPIO18" ;; *) echo "Reserved" ;; esac ;;
+    19) case ${val} in 0x00) echo "*SCL1" ;; 0x01) echo "I2C3_SCL" ;; 0x02) echo "AGPIO19" ;; *) echo "Reserved" ;; esac ;;
+    20) case ${val} in 0x00) echo "*SDA1" ;; 0x01) echo "I2C3_SDA" ;; 0x02) echo "AGPIO20" ;; *) echo "Reserved" ;; esac ;;
+    21) case ${val} in 0x00) echo "*LPC_PD_L" ;; 0x01) echo "EMMC_CMD" ;; 0x02) echo "AGPIO21" ;; *) echo "Reserved" ;; esac ;;
+    22) case ${val} in 0x00) echo "*LPC_PME_L" ;; 0x01) echo "EMMC_PWR_CTRL" ;; 0x02) echo "AGPIO22" ;; *) echo "Reserved" ;; esac ;;
+    23) case ${val} in 0x00) echo "*AC_PRES" ;; 0x01) echo "Reserved" ;; 0x02) echo "MDIO1_SDA" ;; 0x03) echo "AGPIO23" ;; *) echo "Reserved" ;; esac ;;
+    24) case ${val} in 0x00) echo "*USB_OC3_L" ;; 0x01) echo "AGPIO24" ;; *) echo "Reserved" ;; esac ;;
+    26) case ${val} in 0x00) echo "*PCIE_RST_L" ;; 0x01) echo "EGPIO26" ;; *) echo "Reserved" ;; esac ;;
+    27) case ${val} in 0x00) echo "*EGPIO27" ;; 0x01) echo "PCIE_RST1_L" ;; *) echo "Reserved" ;; esac ;;
+    29) case ${val} in 0x00) echo "*SPI_TPM_CS_L" ;; 0x01) echo "AGPIO29" ;; *) echo "Reserved" ;; esac ;;
+    30) case ${val} in 0x00) echo "*SPI_CS2_L" ;; 0x01) echo "ESPI_CS_L" ;; 0x02) echo "AGPIO30" ;; *) echo "Reserved" ;; esac ;;
+    31) case ${val} in 0x00) echo "*SPI_CS3_L" ;; 0x01) echo "ESPI_CS_L" ;; 0x02) echo "AGPIO31" ;; *) echo "Reserved" ;; esac ;;
+    32) case ${val} in 0x00) echo "*LPC_RST_L" ;; 0x01) echo "SD_WP_L" ;; 0x02) echo "AGPIO32" ;; *) echo "Reserved" ;; esac ;;
+    40) case ${val} in 0x00) echo "*AGPIO40" ;; 0x01) echo "Reserved" ;; 0x02) echo "MDIO0_SDA" ;; *) echo "Reserved" ;; esac ;;
+    42) case ${val} in 0x00) echo "*EGPIO42" ;; *) echo "Reserved" ;; esac ;;
+    67) case ${val} in 0x00) echo "*SPI_ROM_REQ" ;; 0x01) echo "EGPIO67" ;; *) echo "Reserved" ;; esac ;;
+    68) case ${val} in 0x00) echo "*AGPIO68" ;; 0x01) echo "EMMC_CD" ;; *) echo "Reserved" ;; esac ;;
+    69) case ${val} in 0x00) echo "*AGPIO69 " ;; *) echo "Reserved" ;; esac ;;
+    70) case ${val} in 0x00) echo "*EGPIO70" ;; 0x01) echo "EMMC_CLK" ;; 0x02) echo "SD_CLK" ;; *) echo "Reserved" ;; esac ;;
+    74) case ${val} in 0x00) echo "*LPCCLK0" ;; 0x01) echo "EMMC_DATA4" ;; 0x02) echo "EGPIO74" ;; *) echo "Reserved" ;; esac ;;
+    75) case ${val} in 0x00) echo "*LPCCLK1" ;; 0x01) echo "EMMC_DATA6" ;; 0x02) echo "EGPIO75" ;; *) echo "Reserved" ;; esac ;;
+    76) case ${val} in 0x00) echo "SPI_ROM_GNT" ;; 0x01) echo "*EGPIO76" ;; *) echo "Reserved" ;; esac ;;
+    84) case ${val} in 0x00) echo "*FANIN0" ;; 0x01) echo "AGPIO84" ;; *) echo "Reserved" ;; esac ;;
+    85) case ${val} in 0x00) echo "FANOUT0" ;; 0x01) echo "*AGPIO85" ;; *) echo "Reserved" ;; esac ;;
+    86) case ${val} in 0x00) echo "*LPC_SMI_L" ;; 0x01) echo "AGPIO86" ;; 0x02) echo "SPI_CLK"  ;; *) echo "Reserved" ;; esac ;;
+    87) case ${val} in 0x00) echo "*SERIRQ" ;; 0x01) echo "EMMC_DATA7" ;; 0x02) echo "AGPIO87" ;; *) echo "Reserved" ;; esac ;;
+    88) case ${val} in 0x00) echo "*LPC_CLKRUN_L" ;; 0x01) echo "EMMC_DATA5" ;; 0x02) echo "AGPIO88" ;; *) echo "Reserved" ;; esac ;;
+    89) case ${val} in 0x00) echo "*GENINT1_L" ;; 0x01) echo "PSP_INTR0" ;; 0x02) echo "AGPIO89" ;; *) echo "Reserved" ;; esac ;;
+    90) case ${val} in 0x00) echo "*GENINT2_L" ;; 0x01) echo "PSP_INTR1" ;; 0x02) echo "AGPIO90" ;; *) echo "Reserved" ;; esac ;;
+    91) case ${val} in 0x00) echo "SPKR" ;; 0x01) echo "*AGPIO91" ;;  *) echo "Reserved" ;; esac ;;
+    92) case ${val} in 0x00) echo "*CLK_REQ0_L" ;; 0x01) echo "SATA_IS0_L" ;; 0x02) echo "SATA_ZP0_L" ;; 0x03) echo "AGPIO92" ;; *) echo "Reserved" ;; esac ;;
+    104) case ${val} in 0x00) echo "*LAD0" ;; 0x01) echo "SPI2_DO_ESPI2_D0" ;; 0x02) echo "SD0_DATA0" ;; 0x03) echo "EGPIO104" ;; *) echo "Reserved" ;; esac ;;
+    105) case ${val} in 0x00) echo "*LAD1" ;; 0x01) echo "SPI2_DI_ESPI2_D1" ;; 0x02) echo "SD0_DATA1" ;; 0x03) echo "EGPIO105" ;; *) echo "Reserved" ;; esac ;;
+    106) case ${val} in 0x00) echo "*LAD2" ;; 0x01) echo "SPI2_WP_L_ESPI2_D2" ;; 0x02) echo "SD0_DATA2" ;; 0x03) echo "EGPIO106" ;; *) echo "Reserved" ;; esac ;;
+    107) case ${val} in 0x00) echo "*LAD3" ;; 0x01) echo "SPI2_HOLD_L_ESPI2_D3" ;; 0x02) echo "SD0_DATA3"  ;; 0x03) echo "EGPIO107" ;; *) echo "Reserved" ;; esac ;;
+    108) case ${val} in 0x00) echo "*LDRQ0_L" ;; 0x01) echo "ESPI_ALERT_D1" ;; 0x02) echo "EGPIO108" ;; *) echo "Reserved" ;; esac ;;
+    109) case ${val} in 0x00) echo "*LFRAME_L" ;; 0x01) echo "EMMC_DS" ;; 0x02) echo "EGPIO109" ;; *) echo "Reserved" ;; esac ;;
+    113) case ${val} in 0x00) echo "*SCL0" ;; 0x01) echo "I2C2_SCL" ;; 0x02) echo "EGPIO113" ;; *) echo "Reserved" ;; esac ;;
+    114) case ${val} in 0x00) echo "*SDA0" ;; 0x01) echo "I2C2_SDA" ;; 0x02) echo "EGPIO114" ;; *) echo "Reserved" ;; esac ;;
+    115) case ${val} in 0x00) echo "*CLK_REQ1_L" ;; 0x01) echo "AGPIO115" ;; *) echo "Reserved" ;; esac ;;
+    116) case ${val} in 0x00) echo "*CLK_REQ2_L" ;; 0x01) echo "AGPIO116" ;; *) echo "Reserved" ;; esac ;;
+    120) case ${val} in 0x00) echo "*CLK_REQ5_L" ;; 0x01) echo "EGPIO120" ;; *) echo "Reserved" ;; esac ;;
+    121) case ${val} in 0x00) echo "*CLK_REQ6_L" ;; 0x01) echo "EGPIO121" ;; *) echo "Reserved" ;; esac ;;
+    129) case ${val} in 0x00) echo "*KBRST_L" ;; 0x02) echo "AGPIO129" ;; *) echo "Reserved" ;; esac ;;
+    130) case ${val} in 0x00) echo "*SATA_ACT_L" ;; 0x01) echo "AGPIO130" ;; *) echo "Reserved" ;; esac ;;
+    131) case ${val} in 0x00) echo "*CLK_REQ3_L" ;; 0x01) echo "SATA_IS1_L" ;; 0x02) echo "SATA_ZP1_L" ;; 0x03) echo "EGPIO131" ;; *) echo "Reserved" ;; esac ;;
+    132) case ${val} in 0x00) echo "*CLK_REQ4_L" ;; 0x01) echo "OSCIN" ;; 0x02) echo "EGPIO132" ;; *) echo "Reserved" ;; esac ;;
+    140) case ${val} in 0x00) echo "EGPIO140" ;; 0x01) echo "*UART0_CTS_L";;  0x02) echo "UART1_TXD" ;; 0x03) echo "SD0_DATA1" ;; *) echo "Reserved" ;; esac ;;
+    141) case ${val} in 0x00) echo "EGPIO141" ;; 0x01) echo "*UART0_RXD" ;; 0x02) echo "SD0_DATA3" ;; *) echo "Reserved" ;; esac ;;
+    142) case ${val} in 0x00) echo "EGPIO142" ;; 0x01) echo "UART0_RTS_L" ;; 0x02) echo "*UART1_RXD" ;; 0x03) echo "SD0_DATA0" ;; *) echo "Reserved" ;; esac ;;
+    143) case ${val} in 0x00) echo "*EGPIO143" ;; 0x01) echo "UART0_TXD" ;; 0x02) echo "SD0_DATA2" ;; *) echo "Reserved" ;; esac ;;
+    144) case ${val} in 0x00) echo "AGPIO144" ;; 0x02) echo "*UART0_INTR" ;; *) echo "Reserved" ;; esac ;;
+    145) case ${val} in 0x00) echo "I2C0_SCL" ;; 0x01) echo "*AGPIO145" ;; *) echo "Reserved" ;; esac ;;
+    146) case ${val} in 0x00) echo "I2C0_SDA" ;; 0x01) echo "*AGPIO146" ;; *) echo "Reserved" ;; esac ;;
+    147) case ${val} in 0x00) echo "I2C1_SCL" ;; 0x01) echo "*AGPIO147" ;; *) echo "Reserved" ;; esac ;;
+    148) case ${val} in 0x00) echo "I2C1_SDA" ;; 0x01) echo "*AGPIO148" ;; *) echo "Reserved" ;; esac ;;
+  esac
+}
+
+print_debounce() {
+  local bank_ctl_val=$1
+  local DebounceTmrOut
+  local deb_cntrl_val
+  local deb_cntrl
+  local deb_tmr_large
+  local deb_tmr_unit
+  local tmr_unit
+  local max_debounce
+
+  DebounceTmrOut="$(hex2dec "$(shift_and_mask "${bank_ctl_val}" "${shift_debounce_tmr}" "${debounce_tmr_mask}")")"
+  deb_cntrl_val=$(shift_and_mask "${bank_ctl_val}" "${shift_debounce_cntrl}" "${debounce_cntrl_mask}")
+
+  if [[ "${deb_cntrl_val}" = "0x0" || ${DebounceTmrOut} -eq 0 ]]; then
+    return # No debounce
+  fi
+
+  deb_tmr_large="$(and_bit "${bank_ctl_val}" "${bit_debounce_unit_high}")"
+  deb_tmr_unit=$(and_bit "${bank_ctl_val}" "${bit_debounce_unit_low}")
+  if [[ "${deb_tmr_large}" = "0x00" && "${deb_tmr_unit}" = "0x00" ]]; then
+    tmr_unit="61 usec"
+    max_debounce="915 usec"
+  elif [[ "${deb_tmr_large}" = "0x00" && "${deb_tmr_unit}" = "0x01" ]]; then
+    tmr_unit="244 usec"
+    max_debounce="3.9 msec"
+  elif [[ "${deb_tmr_large}" = "0x01" && "${deb_tmr_unit}" = "0x00" ]]; then
+    tmr_unit="15.6 msec"
+    max_debounce="250 msec"
+  elif [[ "${deb_tmr_large}" = "0x01" && "${deb_tmr_unit}" = "0x01" ]]; then
+    tmr_unit="62.5 msec"
+    max_debounce="1.0 sec"
+  fi
+
+  case ${deb_cntrl_val} in
+    0x0) deb_cntrl="No Debounce" ;; # For completeness only - this won't get printed.
+    0x1) deb_cntrl="Preserve low glitch" ;;
+    0x2) deb_cntrl="Preserve high glitch" ;;
+    0x3) deb_cntrl="Remove glitch" ;;
+    *) deb_cntrl="Error" ;;
+  esac
+
+  printf "\n  DebounceCntrl:     %s\n" "${deb_cntrl}"
+  printf "  Debounce timer:    %s\n" "${DebounceTmrOut}"
+  printf "  Timer Unit:        %s\n" "${tmr_unit}"
+  printf "  Max Debounce Time  %s" "${max_debounce}"
+}
+
+print_output() {
+  local bank_ctl_val=$1
+  local drv_str_val
+  local drv_str
+
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_output_level}")" = "0x00" ]]; then
+    printf "Output: Low  - "
+  else
+    printf "Output: High - "
+  fi
+
+  drv_str_val=$(shift_and_mask "${bank_ctl_val}" "${shift_drive_str}" "${drive_str_mask}")
+  case ${drv_str_val} in
+    0x0) drv_str="Unsupported" ;;
+    0x1) drv_str="60 ohms" ;;
+    0x2) drv_str="40 ohms" ;;
+    0x3) drv_str="20 ohms" ;;
+    *) drv_str="Error" ;;
+  esac
+  printf "Drive Strength: %s" "${drv_str}"
+}
+
+print_interrupt() {
+  local bank_ctl_val=$1
+  local wake_cntrl
+  local lev_trig
+  local en_int_status
+  local en_int_delivery
+
+  en_int_status="$(and_bit "${bank_ctl_val}" "${bit_en_int_status}")"
+  en_int_delivery="$(and_bit "${bank_ctl_val}" "${bit_en_int_delivery}")"
+
+  if [[ "${en_int_status}" = "0x00" && "${en_int_delivery}" = "0x00" ]]; then
+    return # no interrupt enabled
+  fi
+
+  case $(shift_and_mask "${bank_ctl_val}" "${shift_active_level}" "${active_level_mask}") in
+    0x0) wake_cntrl="Active High" ;;
+    0x1) wake_cntrl="Active Low" ;;
+    0x2) wake_cntrl="Active on both of edges if LevelTrig == 0." ;;
+    0x3) wake_cntrl="Reserved" ;;
+  esac
+
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_lev_trig}")" = "0x00" ]]; then
+    lev_trig="Edge Trigger"
+  else
+    lev_trig="Level Trigger"
+  fi
+
+  if [[ "${en_int_status}" = "0x01" && "${en_int_delivery}" = "0x00" ]]; then
+    printf "\n  Interrupt Status Enabled, %s %s" "${lev_trig}" "${wake_cntrl}"
+  elif [[ "${en_int_status}" = "0x00" && "${en_int_delivery}" = "0x01" ]]; then
+    printf "\n  Interrupt Delivery Enabled, %s %s" "${lev_trig}" "${wake_cntrl}"
+  else
+    printf "\n  Interrupt Status & Delivery Enabled, %s %s" "${lev_trig}" "${wake_cntrl}"
+  fi
+}
+
+print_status() {
+  local gpio=$1
+  local bank_ctl_val=$2
+
+  printf "\n  WakeSts:      %s  " "$(and_bit "${bank_ctl_val}" ${bit_wake_status})"
+  printf "  InterruptSts: %s  " "$(and_bit "${bank_ctl_val}" ${bit_int_status})"
+  printf "  PinSts:       %s  " "$(and_bit "${bank_ctl_val}" ${bit_pin_status})"
+}
+
+print_pull() {
+  local bank_ctl_val=$1
+  local pull_up_en
+  local pull_down_en
+
+  pull_down_en="$(and_bit "${bank_ctl_val}" "${bit_pull_down_en}")"
+  pull_up_en="$(and_bit "${bank_ctl_val}"" ${bit_pull_up_en}")"
+
+  if [[ "${pull_down_en}" = "0x01" ]]; then
+    printf "Pull-down enabled"
+  elif [[ "${pull_up_en}" = "0x01" ]]; then
+    printf "Pull-up enabled"
+  elif [[ "${pull_down_en}" = "0x01" && "${pull_up_en}" = "0x01" ]]; then
+    printf "Both Pull-up and Pull-down enabled."
+  else
+    printf "No pull up or down enabled"
+  fi
+}
+
+print_wake() {
+  local bank_ctl_val=$1
+  local wake_cntrl
+  local wake_en
+
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_wake_s4_s5}")" = "0x01" ]]; then
+    wake_en="  WakeFromS4/S5"
+  fi
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_wake_s3}")" = "0x01" ]]; then
+    wake_en="${wake_en}  WakeFromS3"
+  fi
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_wake_s0i3}")" = "0x01" ]]; then
+    wake_en="${wake_en}  WakeFromS0i3"
+  fi
+
+  if [[ -n "${wake_en}" ]]; then
+    case $(shift_and_mask "${bank_ctl_val}" "${shift_active_level}" "${active_level_mask}") in
+      0x0) wake_cntrl="Active High" ;;
+      0x1) wake_cntrl="Active Low" ;;
+      0x2) wake_cntrl="Active on both of edges if LevelTrig == 0." ;;
+      0x3) wake_cntrl="Reserved" ;;
+    esac
+
+    printf "\n%s %s" "${wake_en}" "${wake_cntrl}"
+  fi
+}
+
+print_input() {
+  local bank_ctl_val=$1
+
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_pin_status}")" = "0x00" ]]; then
+    printf "Input:  Low  - "
+  else
+    printf "Input:  High - "
+  fi
+
+  print_pull "${bank_ctl_val}"
+  print_wake "${bank_ctl_val}"
+  print_interrupt "${bank_ctl_val}"
+  print_debounce "${bank_ctl_val}"
+
+  if [[ ${SHOW_STATUS} -eq 1 ]]; then
+    print_status "${gpio}" "${bank_ctl_val}"
+  fi
+}
+
+gpio_config() {
+  local gpio=$1
+  local offset
+  local bank_ctl_val
+  local retval
+
+  offset=$(get_offset "${GPIO_BASE}" "${gpio}" 4)
+  bank_ctl_val="$(read_32 "${offset}")"; retval=$?
+  if [[ ${retval} != 0 ]]; then exit ${retval}; fi
+
+  printf "GPIO (0x%08x) " "${bank_ctl_val}"
+  # Check if output
+  if [[ "$(and_bit "${bank_ctl_val}" "${bit_output_en}")" = "0x01" ]]; then
+    print_output "${bank_ctl_val}"
+  else
+    print_input "${bank_ctl_val}"
+  fi
+}
+
+get_iomux() {
+  local gpio=$1
+  local offset
+  local iomux_value
+  local iomux
+  local retval
+
+  offset=$(get_offset "${IOMUX_BASE}" "${gpio}")
+  iomux_value=$(read_8 "${offset}"); retval=$?
+  if [[ ${retval} != 0 ]]; then exit ${retval}; fi
+
+  iomux=$(print_czn_iomux "${gpio}" "${iomux_value}"); retval=$?
+  BLOCKED="${retval}"
+  if [[ -n "${iomux}" ]]; then # Only print valid GPIOs
+    printf "GPIO_%03d: iomux (0x%02x) %s | " "${gpio}" "${iomux_value}" "${iomux}"
+    gpio_config "${gpio}"
+  fi
+  printf "\n"
+}
+
+print_inter_master() {
+  local offset
+  local val
+  local mask_sts_len
+  local retval
+
+  offset=$(get_offset "${GPIO_BASE}" "${INTER_MASTER}")
+  val="$(read_32 "${offset}")"; retval=$?
+  if [[ ${retval} != 0 ]]; then exit ${retval}; fi
+
+  mask_sts_len="$(sudo iotools or "$(shift_and_mask "${val}" 24 "0x0f")" \
+    "$(sudo iotools shl "$(shift_and_mask "${val}" 16 "0xff")" 4)")"
+
+  echo "Wake Inter Master Switch Register: val: ${val}"
+  echo "  GpioWakeEn:      $(and_bit "${val}" 31)"
+  echo "  GpioInterruptEn: $(and_bit "${val}" 30)"
+  echo "  EOI:             $(and_bit "${val}" 29)"
+  echo "  MaskStsEn:       $(and_bit "${val}" 28)"
+  echo "  MaskStsLength:   ${mask_sts_len}"
+  echo "  EnWinBlueBtn:    $(and_bit "${val}" 15)"
+  echo "  IntrOutActiveHi: $(and_bit "${val}" 14)"
+  echo "  SelGpio0Src:     $(and_bit "${val}" 13)"
+  echo "  IntrOutPulse:    $(and_bit "${val}" 12)"
+  echo
+}
+
+git_fetch() {
+  local toolname=$1
+  local src_dir=$2
+  local repo_url=$3
+
+  if [ ! -d "${src_dir}" ]; then
+    echo "Cloning ${toolname} repo" >&2
+    git clone "${repo_url}" "${src_dir}" >/dev/null 2>&1
+  else
+    if pushd "${src_dir}" >/dev/null; then
+      git fetch origin >/dev/null 2>&1 && git checkout origin/HEAD >/dev/null 2>&1
+      popd >/dev/null || return
+    fi
+  fi
+}
+
+install_iotools() {
+  local iotools_src_dir="./tmp/iotools"
+  git_fetch "iotools" "${iotools_src_dir}" "https://github.com/martinlroth/iotools.git"
+
+  if pushd "${iotools_src_dir}" >/dev/null; then
+    echo "Building iotools"
+    make -j|| exit 1
+    sudo make install || exit 1
+    popd >/dev/null || return
+  fi
+  rm -rf "${iotools_src_dir}"
+}
+
+main() {
+  echo "This program needs sudo to install and/or run iotools." >&2
+
+  if ! sudo bash -c 'command -v iotools > /dev/null'; then
+    install_iotools
+  fi
+
+  print_inter_master
+
+  for gpio in {0..148}; do
+    get_iomux "${gpio}"
+  done
+
+  if [[ ${BLOCKED} -eq 1 ]]; then
+    echo
+    echo "As a security measure, the Cezanne firmware can request to block access"
+    echo "to a number of registers. This seems to be enabled. Blocked registers:"
+    echo "PMIO    - 0xfed8_0314 to 0xfed8_03bf"
+    echo "IOMUX   - 0xfed8_0d00 to 0xfed8_0dff"
+    echo "MISC    - 0xfed8_0e08 to 0xfed8_0ebf"
+    echo "IO      - 0xcd0 to 0xcd7"
+    echo "LPC CFG - Bus 0 Device 20 Func 3: offsets 0x44 to 0xfc"
+  fi
+}
+
+main
